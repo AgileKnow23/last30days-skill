@@ -467,7 +467,7 @@ Topics about a listed company follow one shape:
 ```
 
 - **Company name first.** Entity grounding keys on the topic's first token; a ticker-first topic (`WHR Whirlpool ...`) demotes every Reddit or StockTwits post that names the company but not the symbol. In the GNRC/FCEL/WHR benchmark, moving the company name first took Whirlpool from 1 ranked item to 22.
-- **Cashtag present.** StockTwits only resolves a symbol from an explicit `$TICKER`; without one the source reports `no symbol resolved`.
+- **Cashtag present.** StockTwits trusts an explicit `$TICKER`; without one it falls back to a name search that can miss or pick the wrong symbol (the benchmark runs without a cashtag reported `no symbol resolved`). A short all-caps company name followed by its own cashtag (`AMD $AMD ...`, `US Bancorp $USB ...`) satisfies the contract.
 - **Keep the topic short and the objective thesis-shaped, not keyword-shaped.** Every lane except YouTube is driven by the `--plan` subqueries, so the detailed research angles (earnings, guidance, backlog, demand, margins, dilution, regulation, competition, filings) belong there. Two measured traps decide the objective wording: the Reddit lane scores relevance against the raw topic's tokens, so a keyword objective (`earnings guidance backlog data center outlook`) admitted off-entity posts about Marvell, Dell and Chevron data-center earnings into Generac's results; the YouTube lane searches the raw topic, so an abstract objective finds few videos (1 per ticker versus 8 for an angle-list topic). Entity precision wins: use the thesis-shaped objective and accept a thin YouTube lane rather than let generic finance vocabulary into the topic.
 
 Examples:
@@ -478,7 +478,7 @@ FuelCell Energy $FCEL material developments affecting the investment thesis
 Whirlpool $WHR material developments affecting the investment thesis
 ```
 
-`--investment-topic` makes the contract mandatory (exit 2 with the violations and a suggested rewrite). Without the flag, a topic the StockTwits gate already treats as financial gets a stderr warning when it is ticker-first or has no cashtag; non-financial topics are never touched. An external workflow can reuse the same check before spending a request: `lib/investment_topic.py` exposes `validate_investment_topic()`, `format_investment_topic()`, and the `EXAMPLES` above with no engine dependencies.
+`--investment-topic` makes the contract mandatory (exit 2 with the violations and a suggested rewrite). Without the flag, a topic the StockTwits gate already treats as financial gets a stderr warning only when it leads with the symbol (a bare ticker, or a cashtag before the company name); a missing cashtag alone never warns, and non-financial topics are never touched. An external workflow can reuse the same check before spending a request: `lib/investment_topic.py` exposes `validate_investment_topic()`, `format_investment_topic()`, and the `EXAMPLES` above with no engine dependencies.
 
 Evidence from one run per ticker is supplementary: the benchmark lands at 14-22 ranked items per ticker. Treat freshness as satisfied only by results whose `date_provenance` is `source_absolute` or `derived_relative`; `unknown` dates are coverage gaps.
 
