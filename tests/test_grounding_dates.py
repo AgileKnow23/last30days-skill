@@ -46,13 +46,26 @@ class RelativeDateParsingTests(unittest.TestCase):
         self.assertEqual("2026-09-06", relative.iso)
 
     def test_interval_carries_rounding_slack(self):
+        # A label is rounded down, so the earliest plausible date is one whole
+        # unit before the point estimate: "2 weeks ago" reaches back to 21 days.
         relative = dates.parse_relative_date("2 weeks ago", now=NOW)
-        self.assertEqual("2026-08-18", relative.earliest.isoformat())
+        self.assertEqual("2026-08-24", relative.iso)
+        self.assertEqual("2026-08-17", relative.earliest.isoformat())
         self.assertTrue(relative.within_window(*WINDOW))
+        month = dates.parse_relative_date("1 month ago", now=NOW)
+        self.assertEqual(("2026-08-08", "2026-07-09"), (month.iso, month.earliest.isoformat()))
         boundary = dates.parse_relative_date("4 weeks ago", now=NOW)
         # Latest plausible date is inside the window, earliest is not.
         self.assertEqual("2026-08-10", boundary.iso)
         self.assertFalse(boundary.within_window(*WINDOW))
+
+    def test_week_slack_is_a_whole_week_at_a_custom_window_edge(self):
+        # "2 weeks ago" can be 20.99 days old, which is 2026-08-17 at this NOW;
+        # a window that opens on the 18th must not admit it, one that opens on
+        # the 17th may.
+        relative = dates.parse_relative_date("2 weeks ago", now=NOW)
+        self.assertFalse(relative.within_window("2026-08-18", "2026-09-07"))
+        self.assertTrue(relative.within_window("2026-08-17", "2026-09-07"))
 
     def test_non_relative_and_malformed_labels_return_none(self):
         for text in ("", None, "Aug 27, 2026", "2026-08-27", "yesterday", "0 days ago", "days ago", "5 fortnights ago"):
@@ -111,6 +124,14 @@ class ResolveResultDateTests(unittest.TestCase):
                 resolved = grounding.resolve_result_date(text, WINDOW, retrieved_at=NOW)
                 self.assertEqual(grounding.DROP_RELATIVE_UNVERIFIABLE, resolved.drop_reason)
                 self.assertEqual("low", resolved.confidence)
+
+    def test_week_label_is_dropped_when_its_whole_week_does_not_fit_a_custom_window(self):
+        twenty_days = ("2026-08-18", "2026-09-07")
+        resolved = grounding.resolve_result_date("2 weeks ago", twenty_days, retrieved_at=NOW)
+        self.assertEqual(grounding.DROP_RELATIVE_UNVERIFIABLE, resolved.drop_reason)
+        kept = grounding.resolve_result_date("2 weeks ago", ("2026-08-17", "2026-09-07"), retrieved_at=NOW)
+        self.assertIsNone(kept.drop_reason)
+        self.assertEqual("med", kept.confidence)
 
     def test_relative_exactly_at_window_start_is_dropped_because_slack_exceeds_it(self):
         resolved = grounding.resolve_result_date("30 days ago", WINDOW, retrieved_at=NOW)

@@ -196,9 +196,11 @@ _UNIT_ALIASES = {
 # that bounds the earliest plausible date. Months are calendar-agnostic on
 # purpose: the label carries no more precision than "about 30N days".
 _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
-# Rounding slack per unit: "5 days ago" can be almost 6 days back, "2 weeks
-# ago" almost 3 weeks, "1 month ago" almost 2 months.
-_UNIT_SLACK_DAYS = {"day": 1, "week": 6, "month": 29}
+# Rounding slack per unit: a label is rounded down, so "5 days ago" can be
+# almost 6 days back, "2 weeks ago" almost 3 weeks, "1 month ago" almost 2
+# months. The earliest plausible calendar date is therefore one whole unit
+# before the point estimate, for every unit alike.
+_UNIT_SLACK_DAYS = {"day": 1, "week": 7, "month": 30}
 _UNIT_PRECISION = {"minute": "day", "hour": "day", "day": "day", "week": "week", "month": "month"}
 
 DATE_PRECISION_DAY = "day"
