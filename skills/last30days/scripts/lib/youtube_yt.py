@@ -579,12 +579,7 @@ def search_youtube(
             view_count = video.get("view_count") if video.get("view_count") is not None else 0
             like_count = video.get("like_count") if video.get("like_count") is not None else 0
             comment_count = video.get("comment_count") if video.get("comment_count") is not None else 0
-            upload_date = video.get("upload_date", "")  # YYYYMMDD
-
-            # Convert YYYYMMDD to YYYY-MM-DD
-            date_str = None
-            if upload_date and len(upload_date) == 8:
-                date_str = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:8]}"
+            date_str, date_fields = resolve_video_date(video, from_date, to_date)
 
             description = str(video.get("description", ""))[:500]
             items.append({
@@ -593,6 +588,7 @@ def search_youtube(
                 "url": f"https://www.youtube.com/watch?v={video_id}",
                 "channel_name": video.get("channel", video.get("uploader", "")),
                 "date": date_str,
+                **date_fields,
                 "engagement": {
                     "views": view_count,
                     "likes": like_count,
@@ -1323,6 +1319,88 @@ def parse_youtube_response(response: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Publication dates: absolute when the provider gives one, derived from a
+# relative label only against an explicit retrieval instant, else unknown.
+# ---------------------------------------------------------------------------
+
+# Provider fields that carry an absolute publish/upload date, in trust order.
+# yt-dlp: upload_date (YYYYMMDD) and timestamp (epoch). ScrapeCreators search:
+# publishedTime (ISO 8601). Generic aliases last.
+_ABSOLUTE_DATE_FIELDS = ("upload_date", "publishedTime", "publishDate", "published_at", "uploadDate", "date")
+_EPOCH_DATE_FIELDS = ("timestamp", "release_timestamp")
+# Relative labels ("2 weeks ago"); ScrapeCreators publishedTimeText, or a
+# generic date field that happens to hold a relative string.
+_RELATIVE_DATE_FIELDS = ("publishedTimeText", "date")
+
+
+def _absolute_video_date(value: Any) -> Optional[str]:
+    """YYYY-MM-DD for YYYYMMDD / ISO 8601 / YYYY-MM-DD values; None when malformed."""
+    if value is None or isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) == 8 and text.isdigit():
+        text = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    parsed = dates.parse_date(text)
+    if parsed is None and "T" in text:
+        parsed = dates.parse_date(text[:10])
+    return parsed.date().isoformat() if parsed else None
+
+
+def resolve_video_date(
+    raw: Dict[str, Any],
+    from_date: str,
+    to_date: str,
+    *,
+    retrieved_at: Optional[Any] = None,
+) -> Tuple[Optional[str], Dict[str, Any]]:
+    """Return ``(published_at, date_fields)`` for a provider video record.
+
+    ``date_fields`` always carries ``date_provenance`` (source_absolute,
+    derived_relative, unknown) and, when a label was seen, ``date_source_text``;
+    derived dates add ``date_precision``, ``date_retrieved_at`` and a
+    ``date_confidence`` that is never 'high'. Nothing is ever inferred from
+    ordering, engagement, transcripts, or the retrieval time itself: with no
+    usable label the date stays None and the provenance ``unknown``.
+    """
+    seen_text = ""
+    for field_name in _ABSOLUTE_DATE_FIELDS:
+        value = raw.get(field_name)
+        if value in (None, ""):
+            continue
+        seen_text = seen_text or str(value)
+        published = _absolute_video_date(value)
+        if published:
+            return published, {"date_provenance": "source_absolute", "date_source_text": str(value)}
+    for field_name in _EPOCH_DATE_FIELDS:
+        value = raw.get(field_name)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            published = dates.timestamp_to_date(float(value))
+            if published:
+                return published, {"date_provenance": "source_absolute", "date_source_text": str(value)}
+    for field_name in _RELATIVE_DATE_FIELDS:
+        value = raw.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        relative = dates.parse_relative_date(value, now=retrieved_at)
+        if relative is None:
+            seen_text = seen_text or value
+            continue
+        return relative.iso, {
+            "date_provenance": "derived_relative",
+            "date_source_text": value.strip(),
+            "date_precision": relative.precision,
+            "date_retrieved_at": relative.retrieved_at.replace(microsecond=0).isoformat(),
+            "date_confidence": dates.relative_date_confidence(relative, from_date, to_date),
+        }
+    fields: Dict[str, Any] = {"date_provenance": "unknown"}
+    if seen_text:
+        fields["date_source_text"] = seen_text.strip()
+    return None, fields
+
+
+# ---------------------------------------------------------------------------
 # ScrapeCreators YouTube API support
 # ---------------------------------------------------------------------------
 
@@ -1594,12 +1672,9 @@ def search_youtube_sc(
         like_count = raw.get("like_count") or raw.get("likes", 0)
         comment_count = raw.get("comment_count") or raw.get("comments", 0)
 
-        # Date: try multiple field names
-        date_str = raw.get("upload_date") or raw.get("date") or raw.get("published_at", "")
-        if date_str and len(date_str) == 8 and date_str.isdigit():
-            date_str = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
-        elif date_str and "T" in date_str:
-            date_str = date_str[:10]
+        # ScrapeCreators returns publishedTime (ISO 8601) and publishedTimeText
+        # ("2 weeks ago"); older shapes used upload_date / date / published_at.
+        date_str, date_fields = resolve_video_date(raw, from_date, to_date)
 
         url = raw.get("url", "")
         if not url and video_id:
@@ -1610,7 +1685,8 @@ def search_youtube_sc(
             "title": title,
             "url": url,
             "channel_name": channel,
-            "date": date_str if date_str else None,
+            "date": date_str,
+            **date_fields,
             "engagement": {
                 "views": view_count or 0,
                 "likes": like_count or 0,
