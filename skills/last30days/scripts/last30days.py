@@ -52,6 +52,7 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from lib import competitors as competitors_mod, corpus, dates, discovery_handoff, env, freshness, html_render, http, permission_preflight, pipeline, registers, render, schema, ui
+from lib import grounding, investment_topic, stocktwits
 
 _child_pids: set[int] = set()
 _child_pids_lock = threading.Lock()
@@ -621,6 +622,44 @@ def persist_report(report: schema.Report, store_db: Path | None = None) -> dict[
                 store.ensure_private_db_files()
 
 
+def _web_max_results_arg(value: str) -> int:
+    """argparse type for --web-max-results: an integer inside the engine bounds."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected an integer, got {value!r}") from exc
+    if not grounding.WEB_MAX_RESULTS_MIN <= parsed <= grounding.WEB_MAX_RESULTS_MAX:
+        raise argparse.ArgumentTypeError(
+            f"must be between {grounding.WEB_MAX_RESULTS_MIN} and {grounding.WEB_MAX_RESULTS_MAX}, got {parsed}"
+        )
+    return parsed
+
+
+def _check_investment_topic(args: argparse.Namespace, topic: str) -> int | None:
+    """Enforce or advise on the investment-topic contract before research runs.
+
+    With --investment-topic a malformed topic is an error (exit 2) so an
+    adapter never spends requests on a topic whose first token would misdirect
+    entity grounding. Without the flag only topics the StockTwits gate already
+    treats as financial get a warning; non-financial topics are untouched, and
+    comparison topics ("X vs Y") are left to comparison mode.
+    """
+    if not topic or " vs " in f" {topic.lower()} ":
+        return None
+    strict = bool(args.investment_topic)
+    if not strict and not stocktwits.is_financial_topic(topic):
+        return None
+    check = investment_topic.validate_investment_topic(topic)
+    if check.ok:
+        return None
+    if strict:
+        sys.stderr.write(f"[last30days] {check.message()}\n")
+        return 2
+    if investment_topic.looks_ticker_first(topic) or not investment_topic.CASHTAG_RE.search(topic):
+        sys.stderr.write(f"[last30days] Warning: {check.message()}\n")
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Research a topic across live social, market, and grounded web sources.",
@@ -798,6 +837,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Override the per-source fetch cap (MAX_SOURCE_FETCHES, default x=2) that limits how many "
                              "subqueries actually fetch a capped source. Raise it so every X subquery in a multi-angle "
                              "--plan runs instead of just the first two. See issue #716.")
+    parser.add_argument("--web-max-results", dest="web_max_results", type=_web_max_results_arg,
+                        help=f"Results requested per subquery from the keyed web backends (Brave, Exa, Serper, "
+                             f"Parallel). {grounding.WEB_MAX_RESULTS_MIN}-{grounding.WEB_MAX_RESULTS_MAX}; "
+                             f"default {grounding.WEB_MAX_RESULTS_DEFAULT}. Overrides LAST30DAYS_WEB_MAX_RESULTS. "
+                             "Every backend bills per request page, so raising it costs credits.")
+    parser.add_argument("--investment-topic", action="store_true",
+                        help="Require the topic to follow the investment contract "
+                             "'<Company Name> $<TICKER> <short research objective>' and exit 2 with guidance when it "
+                             "does not. Without the flag, financial topics that break the contract only get a warning.")
     parser.add_argument("--auto-resolve", action="store_true",
                         help="Use web search to discover subreddits/handles before planning (for platforms without WebSearch)")
     parser.add_argument("--github-user", help="GitHub username for person-mode search (e.g., steipete)")
@@ -3395,6 +3443,10 @@ def _main(
         )
         sys.stderr.flush()
 
+    investment_exit = _check_investment_topic(args, topic)
+    if investment_exit is not None:
+        return investment_exit
+
     progress = ui.ProgressDisplay(topic, show_banner=True)
     progress.start_processing()
 
@@ -3408,6 +3460,8 @@ def _main(
         config["_max_per_source"] = args.max_per_source
     if args.max_source_fetches is not None:
         config["_max_source_fetches"] = args.max_source_fetches
+    if args.web_max_results is not None:
+        config[grounding.WEB_MAX_RESULTS_OVERRIDE_KEY] = args.web_max_results
     try:
         x_related = [h.strip() for h in args.x_related.split(",") if h.strip()] if args.x_related else None
         subreddits = [s.strip().removeprefix("r/") for s in args.subreddits.split(",") if s.strip()] if args.subreddits else None
