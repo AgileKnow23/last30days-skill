@@ -162,10 +162,25 @@ def _report() -> schema.Report:
     )
 
 
-def test_agent_export_matches_v1_2_golden_contract():
+def test_agent_export_matches_v1_3_golden_contract():
     expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
 
     assert schema.to_agent_export(_report()) == expected
+
+
+def test_agent_export_reports_date_provenance_per_result():
+    report = _report()
+    report.ranked_candidates[0].source_items[0].published_at = None
+    report.ranked_candidates[1].source_items[0].metadata["date_provenance"] = "derived_relative"
+
+    exported = schema.to_agent_export(report)
+
+    assert exported["schema_version"] == "1.3"
+    # ``_drop_none`` omits a null ``published_at``; provenance stays explicit.
+    assert exported["results"][0].get("published_at") is None
+    assert exported["results"][0]["date_provenance"] == "unknown"
+    assert exported["results"][1]["date_provenance"] == "derived_relative"
+    assert exported["results"][2]["date_provenance"] == "source_absolute"
 
 
 def test_agent_export_maps_per_run_source_outcomes_to_states():

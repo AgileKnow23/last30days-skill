@@ -536,6 +536,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         ('BRAVE_API_KEY', None),
         ('EXA_API_KEY', None),
         ('SERPER_API_KEY', None),
+        ('LAST30DAYS_WEB_MAX_RESULTS', None),
         ('OPENROUTER_API_KEY', None),
         ('PERPLEXITY_API_KEY', None),
         ('LAST30DAYS_PERPLEXITY_MODE', 'agent'),

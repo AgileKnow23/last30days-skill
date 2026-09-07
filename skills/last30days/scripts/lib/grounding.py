@@ -10,6 +10,132 @@ from urllib.parse import urlparse
 
 from . import dates, env, http, parallel_mcp, schema, web_search_keyless
 
+# Results requested per subquery from the keyed web backends (Brave, Exa,
+# Serper, Parallel). Precedence: --web-max-results > LAST30DAYS_WEB_MAX_RESULTS
+# > default. Bounded because every backend bills per request page and a large
+# page mostly adds tail results the reranker discards anyway.
+WEB_MAX_RESULTS_DEFAULT = 5
+WEB_MAX_RESULTS_MIN = 1
+WEB_MAX_RESULTS_MAX = 20
+WEB_MAX_RESULTS_ENV = "LAST30DAYS_WEB_MAX_RESULTS"
+WEB_MAX_RESULTS_OVERRIDE_KEY = "_web_max_results"
+_WEB_MAX_RESULTS_WARNED: set[str] = set()
+
+
+def resolve_web_max_results(config: dict) -> int:
+    """Resolve the per-subquery web result count from CLI override, env, default.
+
+    The CLI value is validated by argparse before it lands in ``config``; an
+    env value that is not an integer falls back to the default, and one
+    outside the bounds is clamped. Each bad env value warns once per process.
+    """
+    override = config.get(WEB_MAX_RESULTS_OVERRIDE_KEY)
+    if override is not None:
+        return _bounded_count(int(override))
+    raw = config.get(WEB_MAX_RESULTS_ENV)
+    if raw is None or str(raw).strip() == "":
+        return WEB_MAX_RESULTS_DEFAULT
+    text = str(raw).strip()
+    try:
+        value = int(text)
+    except ValueError:
+        _warn_web_max_results(text, f"not an integer; using {WEB_MAX_RESULTS_DEFAULT}")
+        return WEB_MAX_RESULTS_DEFAULT
+    bounded = _bounded_count(value)
+    if bounded != value:
+        _warn_web_max_results(text, f"outside {WEB_MAX_RESULTS_MIN}-{WEB_MAX_RESULTS_MAX}; using {bounded}")
+    return bounded
+
+
+def _bounded_count(value: int) -> int:
+    return max(WEB_MAX_RESULTS_MIN, min(WEB_MAX_RESULTS_MAX, value))
+
+
+def _warn_web_max_results(text: str, reason: str) -> None:
+    if text in _WEB_MAX_RESULTS_WARNED:
+        return
+    _WEB_MAX_RESULTS_WARNED.add(text)
+    sys.stderr.write(f"[Web] {WEB_MAX_RESULTS_ENV}={text!r} is {reason}\n")
+
+
+@dataclass(frozen=True)
+class ResolvedDate:
+    """A search result's publication date with its provenance.
+
+    ``published_at`` is YYYY-MM-DD or None. ``provenance`` is one of
+    ``schema.DATE_PROVENANCES``. ``confidence`` follows the SourceItem scale
+    ('high' only for source-provided dates). ``drop_reason`` is set when the
+    result must not enter the window-gated grounding stream.
+    """
+
+    published_at: str | None
+    provenance: str
+    confidence: str
+    source_text: str
+    precision: str | None = None
+    retrieved_at: str | None = None
+    drop_reason: str | None = None
+
+    def metadata(self) -> dict:
+        meta = {
+            schema.DATE_PROVENANCE_KEY: self.provenance,
+            "date_source_text": self.source_text,
+        }
+        if self.precision:
+            meta["date_precision"] = self.precision
+        if self.retrieved_at:
+            meta["date_retrieved_at"] = self.retrieved_at
+        return meta
+
+
+DROP_UNDATED = "undated"
+DROP_UNPARSABLE = "unparsable_date"
+DROP_OUT_OF_WINDOW = "out_of_window"
+DROP_RELATIVE_UNVERIFIABLE = "relative_unverifiable"
+DROP_REASONS = (DROP_UNDATED, DROP_UNPARSABLE, DROP_OUT_OF_WINDOW, DROP_RELATIVE_UNVERIFIABLE)
+
+
+def resolve_result_date(
+    raw: str | None,
+    date_range: tuple[str, str],
+    *,
+    retrieved_at: datetime | None = None,
+) -> ResolvedDate:
+    """Classify a provider date label for the window-gated grounding stream.
+
+    Absolute labels ("Aug 27, 2026", ISO) keep ``source_absolute`` provenance
+    and the window check they always had. Relative labels ("5 days ago") are
+    resolved against ``retrieved_at`` (UTC, injectable) into an interval and
+    survive only when the whole interval sits inside the window, so a rounded
+    label near the boundary can never be mistaken for fresh. Missing or
+    unparsable labels are ``unknown`` and never pass: the grounding lane
+    requires a date, and an unknown date is not a fresh one.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ResolvedDate(None, schema.DATE_PROVENANCE_UNKNOWN, "low", "", drop_reason=DROP_UNDATED)
+    absolute = _parse_absolute_date(text)
+    if absolute:
+        if not _in_date_range(absolute, date_range):
+            return ResolvedDate(
+                absolute, schema.DATE_PROVENANCE_SOURCE_ABSOLUTE, "low", text,
+                drop_reason=DROP_OUT_OF_WINDOW,
+            )
+        return ResolvedDate(absolute, schema.DATE_PROVENANCE_SOURCE_ABSOLUTE, "high", text)
+    relative = dates.parse_relative_date(text, now=retrieved_at)
+    if relative is None:
+        return ResolvedDate(None, schema.DATE_PROVENANCE_UNKNOWN, "low", text, drop_reason=DROP_UNPARSABLE)
+    confidence = dates.relative_date_confidence(relative, date_range[0], date_range[1])
+    return ResolvedDate(
+        relative.iso,
+        schema.DATE_PROVENANCE_DERIVED_RELATIVE,
+        confidence,
+        text,
+        precision=relative.precision,
+        retrieved_at=relative.retrieved_at.replace(microsecond=0).isoformat(),
+        drop_reason=DROP_RELATIVE_UNVERIFIABLE if confidence == "low" else None,
+    )
+
 
 @dataclass(frozen=True)
 class GroundedClaimText:
@@ -130,8 +256,24 @@ def exa_search(
 # ---------------------------------------------------------------------------
 
 def serper_search(
-    query: str, date_range: tuple[str, str], api_key: str, count: int = 5,
+    query: str,
+    date_range: tuple[str, str],
+    api_key: str,
+    count: int = WEB_MAX_RESULTS_DEFAULT,
+    *,
+    retrieved_at: datetime | None = None,
 ) -> tuple[list[dict], dict]:
+    """Serper (Google) search over the window.
+
+    The ``tbs`` custom date range asks Google for in-window pages, but Google
+    labels many fresh hits relatively ("5 days ago") and some not at all. Each
+    result is therefore classified by ``resolve_result_date`` against the
+    retrieval instant, and the artifact records how many were kept, how many
+    dates were derived, and why the rest were dropped, so a thin web lane is
+    diagnosable instead of silent.
+    """
+    retrieved = dates.utc_now(retrieved_at)
+    count = _bounded_count(int(count))
     data = http.request(
         "POST", "https://google.serper.dev/search",
         headers={"X-API-KEY": api_key},
@@ -142,23 +284,39 @@ def serper_search(
         },
         timeout=15,
     )
+    organic = list(data.get("organic", []) or [])[:count]
     items = []
-    for i, r in enumerate((data.get("organic", []))[:count]):
-        raw_date = r.get("date") or ""
-        pub_date = _parse_serper_date(raw_date)
-        if not _in_date_range(pub_date, date_range):
+    dropped = {reason: 0 for reason in DROP_REASONS}
+    derived = 0
+    for i, r in enumerate(organic):
+        resolved = resolve_result_date(r.get("date"), date_range, retrieved_at=retrieved)
+        if resolved.drop_reason:
+            dropped[resolved.drop_reason] += 1
             continue
+        if resolved.provenance == schema.DATE_PROVENANCE_DERIVED_RELATIVE:
+            derived += 1
         items.append({
             "id": f"WS{i + 1}",
             "title": r.get("title", ""),
             "url": r.get("link", ""),
             "source_domain": _domain(r.get("link", "")),
             "snippet": r.get("snippet", ""),
-            "date": pub_date,
+            "date": resolved.published_at,
+            "date_confidence": resolved.confidence,
             "relevance": 0.8,
             "why_relevant": "Serper web search",
+            "metadata": resolved.metadata(),
         })
-    artifact = {"label": "serper", "webSearchQueries": [query], "resultCount": len(items)}
+    artifact = {
+        "label": "serper",
+        "webSearchQueries": [query],
+        "resultCount": len(items),
+        "organicCount": len(organic),
+        "requestedCount": count,
+        "retrievedAt": retrieved.replace(microsecond=0).isoformat(),
+        "derivedRelativeCount": derived,
+        "dropped": dropped,
+    }
     return items, artifact
 
 
@@ -203,7 +361,8 @@ def parallel_search(
     return items, artifact
 
 
-def _parse_serper_date(raw: str) -> str | None:
+def _parse_absolute_date(raw: str) -> str | None:
+    """YYYY-MM-DD for an absolute label (ISO, epoch, or "Aug 27, 2026"); else None."""
     if not raw:
         return None
     normalized = _normalize_date(raw)
@@ -217,6 +376,12 @@ def _parse_serper_date(raw: str) -> str | None:
     return None
 
 
+def _parse_serper_date(raw: str) -> str | None:
+    """Absolute-only Serper label parser (kept for callers that predate
+    ``resolve_result_date``; relative labels resolve there, not here)."""
+    return _parse_absolute_date(raw)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +393,15 @@ def web_search(
     date_range: tuple[str, str],
     config: dict,
     backend: str = "auto",
+    *,
+    retrieved_at: datetime | None = None,
 ) -> tuple[list[dict], dict]:
-    """Run web search with the specified or auto-detected backend."""
+    """Run web search with the specified or auto-detected backend.
+
+    ``retrieved_at`` pins the instant relative date labels resolve against
+    (tests inject it; live runs use now, UTC).
+    """
+    count = resolve_web_max_results(config)
     if backend == "auto":
         if config.get("BRAVE_API_KEY"):
             backend = "brave"
@@ -252,22 +424,27 @@ def web_search(
         key = config.get("BRAVE_API_KEY")
         if not key:
             raise RuntimeError("BRAVE_API_KEY is required when web_backend='brave'")
-        items, artifact = brave_search(query, date_range, key)
+        items, artifact = brave_search(query, date_range, key, count=count)
     elif backend == "exa":
         key = config.get("EXA_API_KEY")
         if not key:
             raise RuntimeError("EXA_API_KEY is required when web_backend='exa'")
-        items, artifact = exa_search(query, date_range, key)
+        items, artifact = exa_search(query, date_range, key, count=count)
     elif backend == "serper":
         key = config.get("SERPER_API_KEY")
         if not key:
             raise RuntimeError("SERPER_API_KEY is required when web_backend='serper'")
-        items, artifact = serper_search(query, date_range, key)
+        # Only forward an explicit retrieval instant; the default keeps the
+        # legacy call shape (query, range, key, count) for existing doubles.
+        serper_kwargs = {"count": count}
+        if retrieved_at is not None:
+            serper_kwargs["retrieved_at"] = retrieved_at
+        items, artifact = serper_search(query, date_range, key, **serper_kwargs)
     elif backend == "parallel":
         key = config.get("PARALLEL_API_KEY")
         if not key:
             raise RuntimeError("PARALLEL_API_KEY is required when web_backend='parallel'")
-        items, artifact = parallel_search(query, date_range, key)
+        items, artifact = parallel_search(query, date_range, key, count=count)
     elif backend == "parallel-mcp":
         items, artifact = parallel_mcp.search(
             query, date_range, config.get("PARALLEL_API_KEY")
