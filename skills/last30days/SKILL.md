@@ -859,8 +859,18 @@ Known keyword-trap classes and how to handle each:
   4. **X/Twitter and YouTube are the highest-value missing sources for non-English topics.** Surface this clearly in the output so the user knows what would unlock deeper coverage.
 - Do NOT skip this class check for mixed-script queries (e.g. "קפה עלית Elite Coffee") - if any non-Latin characters are present, Class 5 applies.
 
+**Class 6: Listed company / ticker (investment topic)**
+- Pattern: the topic is about a public company's stock or an investment thesis — it contains a ticker, a cashtag, or finance vocabulary (`earnings`, `stock`, `dividend`, `guidance`, `backlog`, `price target`).
+- Why it fails without intervention: entity grounding keys on the topic's FIRST token. A ticker-first topic (`WHR Whirlpool earnings`) makes the symbol the entity, so every Reddit and StockTwits post that says "Whirlpool" but never "WHR" is demoted out of the results (Whirlpool measured 1 ranked item ticker-first vs 22 company-first with the same plan). StockTwits only resolves a symbol from an explicit `$TICKER`. Generic finance vocabulary in the topic is its own trap: the Reddit lane scores relevance against the raw topic's tokens, so a keyword objective (`earnings guidance backlog data center outlook`) admitted off-entity posts about Marvell, Dell and Chevron into Generac's results, while an abstract objective kept entity precision at 100% (at the cost of a thin YouTube lane, which searches the raw topic).
+- Action: rewrite the engine topic to the contract `<Company Name> $<TICKER> <short research objective>` with a thesis-shaped objective, and pass `--investment-topic` so the engine refuses a malformed topic instead of spending requests on it. Put every research angle (earnings, guidance, backlog, demand, margins, dilution, regulation, competition, filings) into separate `--plan` subqueries, never into the topic. Examples:
+  - `Generac $GNRC material developments affecting the investment thesis`
+  - `FuelCell Energy $FCEL material developments affecting the investment thesis`
+  - `Whirlpool $WHR material developments affecting the investment thesis`
+- Note in the Resolved block: "Investment topic detected. Using the company-first cashtag contract; angles live in the plan."
+- Freshness discipline for these topics: in the JSON export, only results whose `date_provenance` is `source_absolute` or `derived_relative` carry a usable date; `unknown` means the provider gave no date and the result must not be presented as recent.
+
 **Pre-Flight decision flow (do this BEFORE any WebSearch):**
-1. Read the topic. Match against Classes 1-5 above.
+1. Read the topic. Match against Classes 1-6 above.
 2. If the topic matches a class, ALWAYS emit a visible pre-flight note before the Resolved block:
    - `Pre-Flight: topic matches {Class N} ({class name}). {Action: clarifying question / reframe / specificity ask}.`
 3. If the action is a clarifying question, STOP after emitting it. Wait for the user response before any engine work.
@@ -893,6 +903,8 @@ Before running the engine, determine which flags apply to this topic and resolve
 | `--web-backend brave` | Step 0.45 Class 5 | **MANDATORY** for non-Latin-script topics (Hebrew, Arabic, CJK, etc.) — Brave is the only source that indexes non-English web |
 | `--web-backend parallel-mcp` | Explicit user request only | Use only when the user asks to use Parallel Search MCP. This opts the run into sending its search objective and queries to `https://search.parallel.ai/mcp`; never select it automatically. Anonymous use sends no authorization header; an existing `PARALLEL_API_KEY` is sent as Bearer auth. |
 | `--auto-resolve` | Fallback | WebSearch is available but Step 0.55 could not resolve everything cleanly — use as belt-and-suspenders |
+| `--investment-topic` | Step 0.45 Class 6 | Topic is a listed company / ticker. Makes the `<Company Name> $<TICKER> <short research objective>` contract mandatory (engine exits 2 with the violations and a suggested rewrite instead of spending requests on a ticker-first topic) |
+| `--web-max-results={n}` | Explicit user request only | User asks for more (or fewer) web results per subquery. `1`-`20`, default `5`; overrides `LAST30DAYS_WEB_MAX_RESULTS`. Every keyed web backend bills per request page, so never raise it on your own |
 
 **Checkpoint before running the engine:** your Bash command must include every flag from the checklist that applies to this topic. For a person who ships code (the Peter Steinberger class), that is MINIMUM `--x-handle` AND `--github-user` AND `--subreddits`, and typically `--x-related` too. A command with only `--x-handle` on a person topic is a pre-flight skip and a Step 0.5 regression.
 

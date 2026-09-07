@@ -41,7 +41,7 @@ When `LAST30DAYS_API_KEY` and `LAST30DAYS_API_BASE` route a run through a config
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema_version` | string | Agent export contract version. The current version is `1.2`. |
+| `schema_version` | string | Agent export contract version. The current version is `1.3`. |
 | `query` | string | The research topic supplied to the engine. |
 | `generated_at` | string | UTC generation timestamp in RFC 3339 format. |
 | `window_days` | integer | Number of days between the report's start and end dates. |
@@ -95,6 +95,7 @@ Cluster array order is ranking order. A result's `cluster` value is the zero-bas
 | `source` | string | Primary source name, such as `reddit`, `x`, `youtube`, or `grounding`. |
 | `url` | string | Canonical result URL. It may be empty when the provider supplies no link. |
 | `published_at` | string | Primary source item's publication date or timestamp. Omitted when unknown. |
+| `date_provenance` | string | How `published_at` is known: `source_absolute` (the provider supplied the timestamp), `derived_relative` (a relative label such as `5 days ago` resolved against the retrieval instant; treat as approximate), or `unknown` (no usable date; never satisfies a freshness requirement). Always present. Added in `1.3`. |
 | `summary` | string | Normalized snippet, with the relevance explanation or body used as fallback. |
 | `engagement` | object | Native engagement counters from the primary source item, such as Reddit `score` and `num_comments` or X `likes` and `reposts`. |
 | `relevance_score` | number | Engine final score normalized to the inclusive `0.0`–`1.0` range. |
@@ -108,12 +109,12 @@ Comparison queries use an envelope so each entity keeps its own contract:
 
 ```json
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "comparison": true,
   "entities": ["OpenAI", "Anthropic"],
   "reports": [
-    {"entity": "OpenAI", "report": {"schema_version": "1.2", "query": "OpenAI"}},
-    {"entity": "Anthropic", "report": {"schema_version": "1.2", "query": "Anthropic"}}
+    {"entity": "OpenAI", "report": {"schema_version": "1.3", "query": "OpenAI"}},
+    {"entity": "Anthropic", "report": {"schema_version": "1.3", "query": "Anthropic"}}
   ]
 }
 ```
@@ -127,6 +128,7 @@ The abbreviated reports above only illustrate the envelope; real reports contain
 - Backward-compatible field additions may use a minor-version bump. Consumers should ignore fields they do not recognize.
 - The checked-in golden snapshot test locks the complete current shape. Contract changes must update the version and snapshot deliberately.
 - `1.2` added `candidate_id` to each `results` entry so verdicts can be joined to the result they annotate.
+- `1.3` added `date_provenance` to each `results` entry so consumers can gate freshness on how a date is known instead of on its mere presence.
 - Discovery `1.1` added `podcast_angle`, `x_article_angle`, `previously_surfaced_count`, `last_surfaced`, and `covered` to each discovery `results` entry — a backward-compatible minor bump; the fields carry their defaults (`null`/`null`/`0`/`null`/`false`) until an angle generator or the topic queue populates them.
 - `--json-profile=raw` is outside this compatibility policy because it mirrors internal pipeline dataclasses.
 
