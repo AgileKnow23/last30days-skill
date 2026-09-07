@@ -635,19 +635,64 @@ def _web_max_results_arg(value: str) -> int:
     return parsed
 
 
+_ADVISORY_TICKER_RE = re.compile(r"^[A-Z]{3,5}$")
+_ADVISORY_NAME_RE = re.compile(r"^[A-Z][A-Za-z&'.-]*[a-z][A-Za-z&'.-]*$")
+
+
+def _abbreviates(head: str, name: str) -> bool:
+    """True when ``head`` reads as an abbreviation of ``name``: the name is longer,
+    starts with the same letter, and carries every letter of the head in order."""
+    letters = name.upper()
+    if len(letters) <= len(head) or not letters.startswith(head[0]):
+        return False
+    position = 0
+    for letter in head:
+        position = letters.find(letter, position)
+        if position < 0:
+            return False
+        position += 1
+    return True
+
+
+def _advisory_ticker_first(topic: str) -> bool:
+    """Whether the advisory may read this topic as leading with the symbol.
+
+    Strict mode owns the contract; the advisory speaks only when the words
+    themselves are evidence. A cashtag at the head, or a bare head that a later
+    cashtag repeats, is unambiguous and is left to ``looks_ticker_first``. A
+    bare upper-case head with no cashtag is read as a ticker in exactly one
+    shape, the one the benchmark produced: three to five letters followed by
+    the longer company name they abbreviate (``WHR Whirlpool``, ``GNRC
+    Generac``, ``FCEL FuelCell``). ``US stock market today``, ``AI Stock
+    Picks``, ``ETF Dividend Yield`` and ``IBM earnings`` share none of that
+    structure and stay silent; a one- or two-letter head is too short to
+    abbreviate anything credibly, so it stays silent too.
+    """
+    tokens = topic.split()
+    if not tokens:
+        return False
+    if investment_topic.CASHTAG_RE.search(topic):
+        return investment_topic.looks_ticker_first(topic)
+    head = tokens[0].strip(",.:;")
+    if len(tokens) < 2 or not _ADVISORY_TICKER_RE.fullmatch(head):
+        return False
+    name = tokens[1].strip(",.:;")
+    return bool(_ADVISORY_NAME_RE.fullmatch(name)) and _abbreviates(head, name)
+
+
 def _check_investment_topic(args: argparse.Namespace, topic: str) -> int | None:
     """Enforce or advise on the investment-topic contract before research runs.
 
     With --investment-topic a malformed topic is an error (exit 2) so an
     adapter never spends requests on a topic whose first token would misdirect
-    entity grounding. Without the flag a topic the StockTwits gate treats as
-    financial gets a warning only when it leads with the symbol: a bare ticker
-    or a cashtag before the company name. A missing cashtag alone never warns,
-    because the gate also fires on everyday words ("stock", "earnings") and
-    StockTwits resolves a company name or a crypto alias on its own. A bare
-    head the crypto aliases already resolve ("BTC price") is left alone too.
-    Non-financial topics are untouched, and comparison topics ("X vs Y") are
-    left to comparison mode.
+    entity grounding. Without the flag the advisory warns only when the
+    topic's own structure leads with the symbol: a cashtag before the company
+    name, or a bare ticker followed by the company name it abbreviates
+    (``_advisory_ticker_first``). Finance vocabulary alone never warns, a
+    missing cashtag alone never warns, a bare acronym ("US stock market
+    today") never warns, and a bare head the crypto aliases already resolve
+    ("BTC Bitcoin price") is left alone. Comparison topics ("X vs Y") are
+    left to comparison mode. Nothing here reaches the network.
     """
     if not topic or " vs " in f" {topic.lower()} ":
         return None
@@ -657,7 +702,7 @@ def _check_investment_topic(args: argparse.Namespace, topic: str) -> int | None:
             return None
         sys.stderr.write(f"[last30days] {check.message()}\n")
         return 2
-    if not stocktwits.is_financial_topic(topic) or not investment_topic.looks_ticker_first(topic):
+    if not _advisory_ticker_first(topic):
         return None
     if not investment_topic.CASHTAG_RE.search(topic) and stocktwits.detect_symbols(topic, resolve=False):
         return None
