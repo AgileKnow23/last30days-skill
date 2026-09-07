@@ -28,6 +28,22 @@ class ValidTopicTests(unittest.TestCase):
     def test_cashtag_only_topic_is_allowed_when_company_named(self):
         self.assertTrue(it.validate_investment_topic("Generac $GNRC").ok)
 
+    def test_a_short_all_caps_company_name_is_not_a_ticker(self):
+        cases = {
+            "AMD $AMD earnings outlook": ("AMD", "AMD"),
+            "IBM $IBM cloud outlook": ("IBM", "IBM"),
+            "UPS $UPS volume outlook": ("UPS", "UPS"),
+            "US Bancorp $USB deposits": ("US Bancorp", "USB"),
+            "ASML $ASML lithography demand": ("ASML", "ASML"),
+            "AMD, $AMD data center share": ("AMD", "AMD"),
+        }
+        for topic, (company, ticker) in cases.items():
+            with self.subTest(topic=topic):
+                check = it.validate_investment_topic(topic)
+                self.assertTrue(check.ok, check.problems)
+                self.assertEqual(company, check.topic.company)
+                self.assertEqual(ticker, check.topic.ticker)
+
     def test_format_round_trips(self):
         topic = it.format_investment_topic("FuelCell Energy", "fcel")
         self.assertEqual(it.EXAMPLES["FCEL"], topic)
@@ -54,7 +70,10 @@ class InvalidTopicTests(unittest.TestCase):
     def test_missing_cashtag_is_rejected_and_no_ticker_is_invented(self):
         check = it.validate_investment_topic("Whirlpool earnings and dividend")
         self.assertFalse(check.ok)
-        self.assertEqual(("no $TICKER cashtag; StockTwits cannot resolve a symbol without one",), check.problems)
+        self.assertEqual(
+            ("no $TICKER cashtag; without one StockTwits falls back to a name search that can miss the symbol",),
+            check.problems,
+        )
         self.assertIsNone(check.suggestion)
         self.assertTrue(it.validate_investment_topic("Whirlpool earnings and dividend", require_cashtag=False).ok)
 
@@ -80,9 +99,25 @@ class InvalidTopicTests(unittest.TestCase):
     def test_looks_ticker_first(self):
         self.assertTrue(it.looks_ticker_first("WHR Whirlpool"))
         self.assertTrue(it.looks_ticker_first("$WHR Whirlpool"))
+        self.assertTrue(it.looks_ticker_first("WHR Whirlpool $WHR earnings"))
+        self.assertTrue(it.looks_ticker_first("NVDA Nvidia $nvda data center"))
         self.assertFalse(it.looks_ticker_first("Whirlpool $WHR"))
+        self.assertFalse(it.looks_ticker_first("AMD $AMD earnings"))
+        self.assertFalse(it.looks_ticker_first("US Bancorp $USB deposits"))
         self.assertFalse(it.looks_ticker_first("Kanye West"))
         self.assertFalse(it.looks_ticker_first(""))
+
+    def test_ticker_repeated_as_a_later_cashtag_is_still_ticker_first(self):
+        check = it.validate_investment_topic("WHR Whirlpool $WHR earnings")
+        self.assertFalse(check.ok)
+        self.assertTrue(any("put the company name first" in p for p in check.problems))
+        self.assertEqual(it.EXAMPLES["WHR"], check.suggestion)
+
+    def test_bare_ticker_without_a_cashtag_is_named_in_the_problem(self):
+        check = it.validate_investment_topic("GNRC Generac outlook")
+        self.assertFalse(check.ok)
+        self.assertTrue(any("bare ticker 'GNRC'" in p and "put the company name first" in p for p in check.problems))
+        self.assertEqual(it.EXAMPLES["GNRC"], check.suggestion)
 
     def test_parse_returns_none_without_a_leading_company(self):
         self.assertIsNone(it.parse_investment_topic("$GNRC thesis"))

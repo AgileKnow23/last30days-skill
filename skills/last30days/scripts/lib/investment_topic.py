@@ -9,8 +9,9 @@ advisory; nothing here changes how a non-financial topic is researched.
 Why the shape matters: entity grounding keys on the topic's first token
 (``rerank._primary_entity`` / ``_entity_grounded``), so a ticker-first topic
 demotes every community post that names the company but not the symbol, and
-StockTwits only resolves a symbol from an explicit cashtag
-(``stocktwits.detect_symbols``). Detailed research angles belong in the
+StockTwits trusts an explicit cashtag while a bare company name goes through
+a symbol search that can miss (``stocktwits.detect_symbols``). Detailed
+research angles belong in the
 ``--plan`` subqueries, never in the topic: the Reddit lane scores relevance
 against the raw topic's tokens, so generic finance vocabulary in the topic
 (``earnings guidance backlog outlook``) pulls in off-entity posts about other
@@ -76,12 +77,30 @@ def format_investment_topic(company: str, ticker: str, objective: str = DEFAULT_
 
 
 def looks_ticker_first(topic: str) -> bool:
-    """True when the first token is a cashtag or a bare all-caps ticker."""
+    """True when the topic leads with the symbol rather than the company name.
+
+    A cashtag head (``$WHR Whirlpool``) always counts. A bare all-caps head
+    is read as a ticker only when the topic offers no other reading: it has
+    no cashtag at all (``WHR Whirlpool earnings``), or the head names the same
+    symbol as a cashtag that comes after other words (``WHR Whirlpool $WHR``).
+    A head that is immediately followed by its own cashtag (``AMD $AMD``) or
+    that differs from the cashtag (``US Bancorp $USB``) is a company name that
+    happens to be short and upper-case, and it satisfies the contract.
+    """
     tokens = topic.split()
     if not tokens:
         return False
     head = tokens[0].strip(",.:;")
-    return bool(CASHTAG_RE.fullmatch(head) or _BARE_TICKER_RE.fullmatch(head))
+    if CASHTAG_RE.fullmatch(head):
+        return True
+    if not _BARE_TICKER_RE.fullmatch(head):
+        return False
+    cashtags = [symbol.upper() for symbol in CASHTAG_RE.findall(topic)]
+    if not cashtags:
+        return True
+    if len(tokens) > 1 and CASHTAG_RE.fullmatch(tokens[1].strip(",.:;")):
+        return False
+    return head.upper() in cashtags
 
 
 def parse_investment_topic(topic: str) -> InvestmentTopic | None:
@@ -105,13 +124,24 @@ def validate_investment_topic(topic: str, *, require_cashtag: bool = True) -> In
     parsed = parse_investment_topic(text)
 
     if looks_ticker_first(text):
-        problems.append(
-            "starts with the ticker; put the company name first so entity grounding "
-            "keys on the company, not the symbol"
-        )
+        if cashtags:
+            problems.append(
+                "starts with the ticker; put the company name first so entity grounding "
+                "keys on the company, not the symbol"
+            )
+        else:
+            head = text.split()[0].strip(",.:;")
+            problems.append(
+                f"starts with the bare ticker '{head}' and has no cashtag; put the company name "
+                f"first and the symbol as a cashtag (Company ${head} ...; when the name is the "
+                f"symbol, {head} ${head} ...)"
+            )
     if not cashtags:
         if require_cashtag:
-            problems.append("no $TICKER cashtag; StockTwits cannot resolve a symbol without one")
+            problems.append(
+                "no $TICKER cashtag; without one StockTwits falls back to a name search "
+                "that can miss the symbol"
+            )
     elif len(cashtags) > 1:
         problems.append("more than one cashtag; research one company per topic")
     elif parsed is None:
