@@ -69,11 +69,42 @@ class InvestmentTopicFlagTests(unittest.TestCase):
         self.assertIn("Warning:", err)
         self.assertIn("Whirlpool $WHR", err)
 
-    def test_advisory_warns_when_a_financial_topic_has_no_cashtag(self):
-        topic = "Whirlpool stock earnings"
+    def test_advisory_warns_on_a_cashtag_before_the_company_name(self):
+        topic = "$WHR Whirlpool earnings"
         code, err = self._run([topic], topic)
         self.assertIsNone(code)
-        self.assertIn("no $TICKER cashtag", err)
+        self.assertIn("Warning:", err)
+        self.assertIn("company name must come first", err)
+
+    def test_advisory_never_warns_for_a_missing_cashtag_alone(self):
+        # The StockTwits gate fires on everyday words, and the lane resolves a
+        # company name or a crypto alias by itself, so a missing cashtag is
+        # not worth a warning outside strict mode.
+        for topic in (
+            "Whirlpool stock earnings",
+            "chicken stock recipe",
+            "best stock photo sites",
+            "Tesla stock",
+            "bitcoin price",
+        ):
+            with self.subTest(topic=topic):
+                self.assertEqual((None, ""), self._run([topic], topic))
+
+    def test_advisory_leaves_a_crypto_alias_the_lane_resolves_alone(self):
+        topic = "BTC price"
+        self.assertEqual((None, ""), self._run([topic], topic))
+
+    def test_strict_mode_accepts_a_short_all_caps_company_name(self):
+        for topic in ("AMD $AMD earnings outlook", "IBM $IBM cloud outlook", "US Bancorp $USB deposits"):
+            with self.subTest(topic=topic):
+                self.assertEqual((None, ""), self._run(["--investment-topic", topic], topic))
+
+    def test_strict_mode_still_rejects_a_ticker_repeated_before_the_name(self):
+        topic = "WHR Whirlpool $WHR earnings"
+        code, err = self._run(["--investment-topic", topic], topic)
+        self.assertEqual(2, code)
+        self.assertIn("put the company name first", err)
+        self.assertIn("Suggested topic: Whirlpool $WHR", err)
 
     def test_non_financial_and_comparison_topics_are_untouched(self):
         for topic in ("Kanye West", "how to deploy on Fly.io", "Generac $GNRC vs Kohler $KOHL stock"):

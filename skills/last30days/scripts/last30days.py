@@ -640,23 +640,29 @@ def _check_investment_topic(args: argparse.Namespace, topic: str) -> int | None:
 
     With --investment-topic a malformed topic is an error (exit 2) so an
     adapter never spends requests on a topic whose first token would misdirect
-    entity grounding. Without the flag only topics the StockTwits gate already
-    treats as financial get a warning; non-financial topics are untouched, and
-    comparison topics ("X vs Y") are left to comparison mode.
+    entity grounding. Without the flag a topic the StockTwits gate treats as
+    financial gets a warning only when it leads with the symbol: a bare ticker
+    or a cashtag before the company name. A missing cashtag alone never warns,
+    because the gate also fires on everyday words ("stock", "earnings") and
+    StockTwits resolves a company name or a crypto alias on its own. A bare
+    head the crypto aliases already resolve ("BTC price") is left alone too.
+    Non-financial topics are untouched, and comparison topics ("X vs Y") are
+    left to comparison mode.
     """
     if not topic or " vs " in f" {topic.lower()} ":
         return None
-    strict = bool(args.investment_topic)
-    if not strict and not stocktwits.is_financial_topic(topic):
-        return None
-    check = investment_topic.validate_investment_topic(topic)
-    if check.ok:
-        return None
-    if strict:
+    if args.investment_topic:
+        check = investment_topic.validate_investment_topic(topic)
+        if check.ok:
+            return None
         sys.stderr.write(f"[last30days] {check.message()}\n")
         return 2
-    if investment_topic.looks_ticker_first(topic) or not investment_topic.CASHTAG_RE.search(topic):
-        sys.stderr.write(f"[last30days] Warning: {check.message()}\n")
+    if not stocktwits.is_financial_topic(topic) or not investment_topic.looks_ticker_first(topic):
+        return None
+    if not investment_topic.CASHTAG_RE.search(topic) and stocktwits.detect_symbols(topic, resolve=False):
+        return None
+    check = investment_topic.validate_investment_topic(topic)
+    sys.stderr.write(f"[last30days] Warning: {check.message()}\n")
     return None
 
 
