@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.2",
+  "schema_version": "1.3",
   "query": "AI coding agents",
   "generated_at": "2026-07-10T00:00:00Z",
   "window_days": 30,
@@ -46,6 +46,7 @@
       "source": "reddit",
       "url": "https://www.reddit.com/r/programming/comments/agent-workflows",
       "published_at": "2026-06-28",
+      "date_provenance": "source_absolute",
       "summary": "Developers shared concrete agent workflows.",
       "engagement": {
         "score": 1543,
@@ -60,6 +61,7 @@
       "source": "x",
       "url": "https://x.com/example/status/123",
       "published_at": "2026-07-02",
+      "date_provenance": "source_absolute",
       "summary": "Teams compared how agents fit into code review.",
       "engagement": {
         "likes": 800,
@@ -74,6 +76,7 @@
       "source": "digg",
       "url": "https://di.gg/ai/agent-leaderboard",
       "published_at": "2026-07-05",
+      "date_provenance": "source_absolute",
       "summary": "A small Digg cluster appeared low on the leaderboard.",
       "engagement": {
         "postCount": 5,

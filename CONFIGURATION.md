@@ -58,6 +58,8 @@ The engine's `.env` reader doesn't expand `$HOME` — only the tilde, via `Path(
 - `--drill <target>` - deep follow-up over the fresh `~/.config/last30days/last-report.json` cache. Accepts a 1-based index (`--drill "cluster 3"` or `--drill "3"`) or a fuzzy cluster title/entity description. It re-fetches only sources that contributed to the matched cluster, enables their deep comment/transcript enrichment paths, merges/dedupes the evidence, and replaces the cache so drills can chain. Run it without a positional topic; if the cache is absent or expired, run a normal research pass first.
 - `--verify-freshness` - opt into an act-time verification pass for conservatively extracted, source-grounded claims (Polymarket odds/end dates, GitHub stars, StockTwits sentiment ratios, and explicit status assertions). With a topic, verification runs after research; without a topic, it re-verifies the fresh `last-report.json` cache without repeating research. Verdicts are `current`, `stale`, `contradicted`, or `unsupported` and include evidence timestamps. Set `LAST30DAYS_VERIFY_FRESHNESS=on` in `.env` to make the pass default for normal research runs.
 - `--save-suffix <name>` - distinguish runs of the same topic (e.g. per client: `--save-suffix=acme`).
+- `--web-max-results <n>` - results requested per subquery from the keyed web backends (Brave, Exa, Serper, Parallel). `1`-`20`, default `5`. Flag wins over `LAST30DAYS_WEB_MAX_RESULTS`; values outside the bounds are rejected. Every backend bills per request page, so raising it costs credits (see [Web search backend priority](#web-search-backend-priority)).
+- `--investment-topic` - require the topic to follow `<Company Name> $<TICKER> <short research objective>` and exit 2 with guidance when it does not (see [Investment topics](#investment-topics-cashtag-contract)).
 - `--no-browser-cookies` - hard-disable browser-cookie extraction for this run, even when `FROM_BROWSER` is configured. MCP and folder-mode hosts use this for safe defaults.
 - `--publish-html` - with `--emit=html`, publish the rendered HTML to `ht-ml.app` after local output/save-dir writes. This is explicit opt-in only; pages are public by default.
 - `library feed` - scan `LAST30DAYS_MEMORY_DIR` plus `~/.local/share/last30days/briefs/`, then write a self-contained `index.html`, valid Atom `feed.xml`, and browser-ready pages under `briefs/`. The index is reverse-chronological and grouped by topic. For direct engine use: `python3 skills/last30days/scripts/last30days.py library feed`; use `--save-dir <path>` to scan and write another library directory.
@@ -433,6 +435,9 @@ Relevant env vars:
 | --- | --- |
 | `LAST30DAYS_NATIVE_SEARCH=1` | Tells the engine your agent session has host-side web search; suppresses the keyless floor. Set automatically by the skill when web search is available. Leave unset when the agent has no web-search tool so the floor runs. |
 | `LAST30DAYS_SEARXNG_URL=<base-url>` | Optional. A SearXNG instance used as the keyless-search fallback rung when DuckDuckGo returns nothing. |
+| `LAST30DAYS_WEB_MAX_RESULTS=<n>` | Results requested per subquery from the keyed backends (Brave, Exa, Serper, Parallel). Default `5`, bounds `1`-`20`. Precedence: `--web-max-results` > this variable > default. A non-integer value falls back to the default and an out-of-range value is clamped, each with one stderr warning. Cost scales with it: a 4-subquery plan makes 4 requests regardless of `n`, and each backend bills per request page; check your provider's plan for how larger pages are charged before raising it. |
+
+**Web result dates.** Google (Serper) labels many fresh hits relatively (`10 hours ago`, `5 days ago`, `2 weeks ago`). The engine resolves those against the retrieval instant (UTC) into a plausible interval and keeps the result only when the whole interval sits inside the research window; the derived date is exported with `date_provenance: derived_relative` and `date_confidence: med`, never `high`. Results with no date, an unparsable date, or a relative label that straddles the window edge (`4 weeks ago`, `1 month ago` on a 30-day run) are dropped from the web lane and counted in the run's grounding artifact (`dropped.undated`, `dropped.unparsable_date`, `dropped.out_of_window`, `dropped.relative_unverifiable`). An unknown date is never treated as fresh. The `--json-profile=agent` export carries `date_provenance` per result (`source_absolute`, `derived_relative`, `unknown`); see `docs/reference/json-export.md`.
 | `LAST30DAYS_TRUSTPILOT_NO_BROWSER=1` | Optional. Truthy value disables the Trustpilot source's one-time headless-Chrome WAF-cookie harvest, so an automated/headless run (cron, CI, the eval harness) never spawns a browser. Trustpilot still degrades to empty gracefully. |
 
 Privacy note: the keyless floor sends the query (to DuckDuckGo / your SearXNG instance) and any fetched URL (to Jina Reader) to those third parties. It is intended for public-research use; results may be cached snapshots. It never runs when native search or a paid backend is in play.
@@ -452,6 +457,30 @@ python3 skills/last30days/scripts/last30days.py "Listen Labs" --hiring-signals
 The engine treats public jobs/careers postings as evidence of focus or priority shifts, not exact roadmap predictions. Standard company runs may include Hiring Signals automatically when multiple current roles support the same interpretation; weak or unavailable hiring evidence is omitted.
 
 ---
+
+## Investment topics (cashtag contract)
+
+Topics about a listed company follow one shape:
+
+```
+<Company Name> $<TICKER> <short research objective>
+```
+
+- **Company name first.** Entity grounding keys on the topic's first token; a ticker-first topic (`WHR Whirlpool ...`) demotes every Reddit or StockTwits post that names the company but not the symbol. In the GNRC/FCEL/WHR benchmark, moving the company name first took Whirlpool from 1 ranked item to 22.
+- **Cashtag present.** StockTwits trusts an explicit `$TICKER`; without one it falls back to a name search that can miss or pick the wrong symbol (the benchmark runs without a cashtag reported `no symbol resolved`). A short all-caps company name followed by its own cashtag (`AMD $AMD ...`, `US Bancorp $USB ...`) satisfies the contract.
+- **Keep the topic short and the objective thesis-shaped, not keyword-shaped.** Every lane except YouTube is driven by the `--plan` subqueries, so the detailed research angles (earnings, guidance, backlog, demand, margins, dilution, regulation, competition, filings) belong there. Two measured traps decide the objective wording: the Reddit lane scores relevance against the raw topic's tokens, so a keyword objective (`earnings guidance backlog data center outlook`) admitted off-entity posts about Marvell, Dell and Chevron data-center earnings into Generac's results; the YouTube lane searches the raw topic, so an abstract objective finds few videos (1 per ticker versus 8 for an angle-list topic). Entity precision wins: use the thesis-shaped objective and accept a thin YouTube lane rather than let generic finance vocabulary into the topic.
+
+Examples:
+
+```
+Generac $GNRC material developments affecting the investment thesis
+FuelCell Energy $FCEL material developments affecting the investment thesis
+Whirlpool $WHR material developments affecting the investment thesis
+```
+
+`--investment-topic` makes the contract mandatory (exit 2 with the violations and a suggested rewrite). Without the flag, the advisory warns only when the topic's own structure leads with the symbol: a cashtag before the company name (`$WHR Whirlpool ...`), or a three-to-five-letter ticker followed by the longer company name it abbreviates (`WHR Whirlpool ...`). Finance vocabulary alone never warns, a missing cashtag alone never warns, and a bare acronym (`US stock market today`, `ETF dividend yield`, `IBM earnings`) never warns: a missed advisory is safer than a wrong one, and strict mode remains the enforceable contract. An external workflow can reuse the same check before spending a request: `lib/investment_topic.py` exposes `validate_investment_topic()`, `format_investment_topic()`, and the `EXAMPLES` above with no engine dependencies.
+
+Evidence from one run per ticker is supplementary: the benchmark lands at 14-22 ranked items per ticker. Treat freshness as satisfied only by results whose `date_provenance` is `source_absolute` or `derived_relative`; `unknown` dates are coverage gaps.
 
 ## Health check (`doctor`)
 

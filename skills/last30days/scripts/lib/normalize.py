@@ -433,6 +433,9 @@ def _normalize_youtube(
         score_keys=("score", "likes"),
         excerpt_keys=("excerpt", "text"),
     )
+    for key in ("date_provenance", "date_source_text", "date_precision", "date_retrieved_at"):
+        if item.get(key):
+            metadata[key] = item[key]
     return _source_item(
         item_id=str(item.get("video_id") or item.get("id") or f"YT{index + 1}"),
         source=source,

@@ -641,6 +641,46 @@ def candidate_source_label(candidate: Candidate) -> str:
     return ", ".join(sources) if sources else "unknown"
 
 
+# Date provenance: how an item's ``published_at`` came to be known. Stored in
+# ``SourceItem.metadata`` so every adapter can annotate without a schema
+# change; read through ``date_provenance()`` so consumers never guess.
+DATE_PROVENANCE_KEY = "date_provenance"
+DATE_PROVENANCE_SOURCE_ABSOLUTE = "source_absolute"
+DATE_PROVENANCE_DERIVED_RELATIVE = "derived_relative"
+DATE_PROVENANCE_UNKNOWN = "unknown"
+DATE_PROVENANCES = (
+    DATE_PROVENANCE_SOURCE_ABSOLUTE,
+    DATE_PROVENANCE_DERIVED_RELATIVE,
+    DATE_PROVENANCE_UNKNOWN,
+)
+
+
+def date_provenance(item: SourceItem | None) -> str:
+    """Return the provenance of ``item.published_at``.
+
+    ``unknown`` whenever there is no date at all, regardless of what an
+    adapter wrote. Dated items default to ``source_absolute``: every legacy
+    adapter copies a timestamp the provider supplied (Reddit created_utc,
+    yt-dlp upload_date, HN time, StockTwits created_at). Only adapters that
+    resolve relative labels against retrieval time write ``derived_relative``.
+    """
+    if item is None or not item.published_at:
+        return DATE_PROVENANCE_UNKNOWN
+    raw = (item.metadata or {}).get(DATE_PROVENANCE_KEY)
+    if raw == DATE_PROVENANCE_DERIVED_RELATIVE:
+        return DATE_PROVENANCE_DERIVED_RELATIVE
+    return DATE_PROVENANCE_SOURCE_ABSOLUTE
+
+
+def freshness_verifiable(item: SourceItem | None) -> bool:
+    """True when the item carries a date a freshness gate may rely on.
+
+    An unknown date is a coverage gap: it must never satisfy a freshness
+    requirement, silently or otherwise.
+    """
+    return date_provenance(item) != DATE_PROVENANCE_UNKNOWN
+
+
 def candidate_out_of_window(candidate: Candidate) -> bool:
     """True when every dated item behind this candidate falls outside the window.
 
@@ -689,7 +729,7 @@ def candidate_primary_item(candidate: Candidate) -> SourceItem | None:
     return candidate.source_items[0]
 
 
-AGENT_EXPORT_SCHEMA_VERSION = "1.2"
+AGENT_EXPORT_SCHEMA_VERSION = "1.3"
 
 
 def without_sources(report: Report, excluded_sources: set[str]) -> Report:
@@ -914,6 +954,7 @@ def to_agent_export(
                     "source": candidate.source,
                     "url": candidate.url,
                     "published_at": primary.published_at if primary else None,
+                    "date_provenance": date_provenance(primary),
                     "summary": _agent_summary(candidate),
                     "engagement": _agent_engagement(candidate),
                     "relevance_score": round(

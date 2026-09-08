@@ -1,6 +1,8 @@
 """Date utilities for last30days skill."""
 
-from datetime import datetime, timedelta, timezone
+import re
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 
@@ -75,6 +77,7 @@ def parse_date(date_str: Optional[str]) -> Optional[datetime]:
         "%Y-%m-%d",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
         "%Y-%m-%dT%H:%M:%S%z",
         "%Y-%m-%dT%H:%M:%S.%f%z",
     ]
@@ -167,3 +170,116 @@ def recency_score(
         return 0
 
     return int(100 * (1 - age / max_days))
+
+
+# ---------------------------------------------------------------------------
+# Relative dates ("5 days ago") resolved against an explicit retrieval time
+# ---------------------------------------------------------------------------
+
+# Search providers label fresh results relatively ("10 hours ago", "2 weeks
+# ago") instead of with a calendar date. Resolving them needs the retrieval
+# instant, and the label is rounded, so the result is an interval, never a
+# point: "5 days ago" may be anywhere from 5 to just under 6 days back.
+_RELATIVE_DATE_RE = re.compile(
+    r"^\s*(?P<amount>\d{1,4}|an?|one)\s+"
+    r"(?P<unit>minute|min|hour|hr|day|week|wk|month|mo)s?\s+ago\s*$",
+    re.IGNORECASE,
+)
+_UNIT_ALIASES = {
+    "min": "minute", "minute": "minute",
+    "hr": "hour", "hour": "hour",
+    "day": "day",
+    "wk": "week", "week": "week",
+    "mo": "month", "month": "month",
+}
+# Days per unit for the point estimate ("latest"), plus the rounding slack
+# that bounds the earliest plausible date. Months are calendar-agnostic on
+# purpose: the label carries no more precision than "about 30N days".
+_UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
+# Rounding slack per unit: a label is rounded down, so "5 days ago" can be
+# almost 6 days back, "2 weeks ago" almost 3 weeks, "1 month ago" almost 2
+# months. The earliest plausible calendar date is therefore one whole unit
+# before the point estimate, for every unit alike.
+_UNIT_SLACK_DAYS = {"day": 1, "week": 7, "month": 30}
+_UNIT_PRECISION = {"minute": "day", "hour": "day", "day": "day", "week": "week", "month": "month"}
+
+DATE_PRECISION_DAY = "day"
+DATE_PRECISION_WEEK = "week"
+DATE_PRECISION_MONTH = "month"
+
+
+@dataclass(frozen=True)
+class RelativeDate:
+    """A relative label resolved against a UTC retrieval instant."""
+
+    text: str
+    amount: int
+    unit: str
+    precision: str
+    latest: date
+    earliest: date
+    retrieved_at: datetime
+
+    @property
+    def iso(self) -> str:
+        """Point estimate (latest plausible calendar date) in YYYY-MM-DD."""
+        return self.latest.isoformat()
+
+    def within_window(self, from_date: str, to_date: str) -> bool:
+        """True only when every plausible calendar date falls inside the window."""
+        return from_date <= self.earliest.isoformat() and self.latest.isoformat() <= to_date
+
+
+def utc_now(value: Optional[datetime] = None) -> datetime:
+    """Return an aware UTC datetime; naive inputs are taken as UTC."""
+    if value is None:
+        return datetime.now(timezone.utc)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def parse_relative_date(text: Optional[str], *, now: Optional[datetime] = None) -> Optional[RelativeDate]:
+    """Parse "N minutes|hours|days|weeks|months ago" against ``now`` (UTC).
+
+    Returns None for anything else (absolute dates, "yesterday", garbage), so
+    callers fall through to their absolute-date parsing or to "unknown".
+    """
+    if not text:
+        return None
+    match = _RELATIVE_DATE_RE.match(str(text))
+    if not match:
+        return None
+    raw_amount = match.group("amount").lower()
+    amount = 1 if raw_amount in ("a", "an", "one") else int(raw_amount)
+    if amount <= 0:
+        return None
+    unit = _UNIT_ALIASES[match.group("unit").lower()]
+    reference = utc_now(now)
+    if unit == "minute":
+        latest_dt = reference - timedelta(minutes=amount)
+        earliest_dt = latest_dt
+    elif unit == "hour":
+        latest_dt = reference - timedelta(hours=amount)
+        earliest_dt = latest_dt
+    else:
+        latest_dt = reference - timedelta(days=amount * _UNIT_DAYS[unit])
+        earliest_dt = latest_dt - timedelta(days=_UNIT_SLACK_DAYS[unit])
+    return RelativeDate(
+        text=str(text).strip(),
+        amount=amount,
+        unit=unit,
+        precision=_UNIT_PRECISION[unit],
+        latest=latest_dt.date(),
+        earliest=earliest_dt.date(),
+        retrieved_at=reference,
+    )
+
+
+def relative_date_confidence(relative: RelativeDate, from_date: str, to_date: str) -> str:
+    """Confidence for a derived date: never 'high' (that is reserved for
+    source-provided dates); 'med' when the whole plausible interval sits inside
+    the window, otherwise 'low'."""
+    if relative.precision == DATE_PRECISION_MONTH:
+        return "low"
+    return "med" if relative.within_window(from_date, to_date) else "low"
